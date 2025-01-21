@@ -83,42 +83,43 @@ class DDPG(AbstractDPG):
         total_actor_loss = torch.zeros(self._batch_count)
         total_critic_loss = torch.zeros(self._batch_count)
 
-        for idx, batch in enumerate(self.storage.batch_generator(self._batch_size, self._batch_count)):
-            actor_obs = batch["actor_observations"]
-            critic_obs = batch["critic_observations"]
-            actions = batch["actions"]
-            rewards = batch["rewards"]
-            actor_next_obs = batch["next_actor_observations"]
-            critic_next_obs = batch["next_critic_observations"]
-            dones = batch["dones"]
+        for epoch in range(self._num_learning_epochs):
+            for idx, batch in enumerate(self.storage.batch_generator(self._batch_size, self._batch_count)):
+                actor_obs = batch["actor_observations"]
+                critic_obs = batch["critic_observations"]
+                actions = batch["actions"]
+                rewards = batch["rewards"]
+                actor_next_obs = batch["next_actor_observations"]
+                critic_next_obs = batch["next_critic_observations"]
+                dones = batch["dones"]
 
-            target_actor_prediction = self._process_actions(self.target_actor.forward(actor_next_obs))
-            target_critic_prediction = self.target_critic.forward(
-                self._critic_input(critic_next_obs, target_actor_prediction)
-            )
+                target_actor_prediction = self._process_actions(self.target_actor.forward(actor_next_obs))
+                target_critic_prediction = self.target_critic.forward(
+                    self._critic_input(critic_next_obs, target_actor_prediction)
+                )
 
-            target = rewards + self._discount_factor * (1 - dones) * target_critic_prediction
-            prediction = self.critic.forward(self._critic_input(critic_obs, actions))
-            critic_loss = (prediction - target).pow(2).mean()
+                target = rewards + self._discount_factor * (1 - dones) * target_critic_prediction
+                prediction = self.critic.forward(self._critic_input(critic_obs, actions))
+                critic_loss = (prediction - target).pow(2).mean()
 
-            self.critic_optimizer.zero_grad()
-            critic_loss.backward()
-            self.critic_optimizer.step()
+                self.critic_optimizer.zero_grad()
+                critic_loss.backward()
+                self.critic_optimizer.step()
 
-            evaluation = self.critic.forward(
-                self._critic_input(critic_obs, self._process_actions(self.actor.forward(actor_obs)))
-            )
-            actor_loss = -evaluation.mean()
+                evaluation = self.critic.forward(
+                    self._critic_input(critic_obs, self._process_actions(self.actor.forward(actor_obs)))
+                )
+                actor_loss = -evaluation.mean()
 
-            self.actor_optimizer.zero_grad()
-            actor_loss.backward()
-            self.actor_optimizer.step()
+                self.actor_optimizer.zero_grad()
+                actor_loss.backward()
+                self.actor_optimizer.step()
 
-            self._update_target(self.actor, self.target_actor)
-            self._update_target(self.critic, self.target_critic)
+                self._update_target(self.actor, self.target_actor)
+                self._update_target(self.critic, self.target_critic)
 
-            total_actor_loss[idx] = actor_loss.item()
-            total_critic_loss[idx] = critic_loss.item()
+                total_actor_loss[idx] = actor_loss.item()
+                total_critic_loss[idx] = critic_loss.item()
 
         stats = {"actor": total_actor_loss.mean().item(), "critic": total_critic_loss.mean().item()}
 

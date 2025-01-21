@@ -5,7 +5,7 @@ import numpy as np
 import os
 import time
 import torch
-from typing import Any, Callable, Dict, List, Tuple, TypedDict, Union
+from typing import Any, Callable, Dict, List, Tuple, TypedDict, Union, Optional
 
 import rsl_rl
 from rsl_rl.storage.storage import Dataset
@@ -61,6 +61,8 @@ class Runner:
         evaluation_cb: List[Callback] = None,
         learn_cb: List[Callback] = None,
         observation_history_length: int = 1,
+        teacher: Optional[Callable] = None,
+        teacher_sample_prob: float = 0.5,
         **kwargs,
     ) -> None:
         """
@@ -75,7 +77,11 @@ class Runner:
             observation_history_length: The number of observations to concatenate into a single observation.
         """
         self.env = environment
-        self.agent = agent
+        self.agent = agent        
+        self.teacher = teacher
+        if self.teacher is not None:
+            self.teacher_env_idx = torch.rand(self.env.num_envs) > teacher_sample_prob
+            print ("sampled teacher env idx = ", self.teacher_env_idx)
         self.device = device
         self._obs_hist_len = observation_history_length
         self._learn_cb = learn_cb if learn_cb else []
@@ -281,6 +287,11 @@ class Runner:
             self._episode_statistics["info"].clear()
             self._current_learning_iteration = self._episode_statistics["current_iteration"]
 
+    def _mix(self, arr: torch.Tensor, arr_teacher: torch.Tensor):        
+        mixed_arr = arr.clone().detach()
+        mixed_arr[self.teacher_env_idx] = arr_teacher[self.teacher_env_idx]
+        return mixed_arr
+
     def _collect(self) -> None:
         """Runs a single step in the environment to collect a transition and stores it in the dataset.
 
@@ -292,6 +303,15 @@ class Runner:
             actions, data = self.agent.draw_actions(self._obs, self._env_info)
         else:
             actions, data = self.agent.draw_random_actions(self._obs, self._env_info)
+
+        if self.teacher is not None:
+            # draw eacher actions
+            teacher_actions, teacher_data = self.agent.draw_actions_with_teacher(self._obs, self._env_info, self.teacher)
+
+            # create mixed batch (TODO: improve efficiency by drawing actions with teacher_env_idx)
+            actions = self._mix(actions, teacher_actions)
+            for k in data:                
+                data[k] = self._mix(data[k], teacher_data[k])
 
         next_obs, rewards, dones, next_env_info = self.env.step(actions)
 

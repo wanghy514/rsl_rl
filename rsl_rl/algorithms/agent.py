@@ -71,6 +71,12 @@ class Agent(ABC, Benchmarkable, Serializable):
         """
         pass
 
+    @abstractmethod
+    def draw_actions_with_teacher(
+        self, obs: torch.Tensor, env_info: Dict[str, Any], teacher: Callable
+    ) -> Tuple[torch.Tensor, Union[Dict[str, torch.Tensor], None]]:        
+        pass
+
     def draw_random_actions(
         self, obs: torch.Tensor, env_info: Dict[str, Any]
     ) -> Tuple[torch.Tensor, Union[Dict[str, torch.Tensor], None]]:

@@ -34,8 +34,7 @@ class LeggedGymRunner(Runner):
         ("desired_kl", "target_kl"),
         ("entropy_coef", "entropy_coeff"),
         ("lam", "gae_lambda"),
-        ("max_grad_norm", "gradient_clip"),
-        ("num_learning_epochs", None),
+        ("max_grad_norm", "gradient_clip"),        
         ("num_mini_batches", "batch_count"),
         ("use_clipped_value_loss", None),
         ("value_loss_coef", "value_coeff"),
@@ -61,7 +60,7 @@ class LeggedGymRunner(Runner):
 
         return env
 
-    def __init__(self, env: VecEnv, train_cfg, log_dir=None, device="cpu"):
+    def __init__(self, env: VecEnv, train_cfg, log_dir=None, device="cpu", **kwargs):
         env = self._hook_env(env)
         self.cfg = train_cfg["runner"]
 
@@ -121,6 +120,7 @@ class LeggedGymRunner(Runner):
             evaluation_cb=evaluation_callbacks,
             device=device,
             num_steps_per_env=self.cfg["num_steps_per_env"],
+            **kwargs,
         )
 
         self._iteration_time = 0.0

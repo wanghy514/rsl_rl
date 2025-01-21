@@ -25,8 +25,9 @@ class AbstractActorCritic(Agent):
         actor_recurrent_tf_context_length: int = 64,
         actor_recurrent_tf_head_count: int = 8,
         actor_shared_dims: int = None,
+        num_learning_epochs: int = 1,
         batch_count: int = 1,
-        batch_size: int = 1,
+        batch_size: int = 1,        
         critic_activations: List[str] = ["relu", "relu", "relu", "linear"],
         critic_hidden_dims: List[int] = [256, 256, 256],
         critic_init_gain: float = 0.5,
@@ -83,8 +84,9 @@ class AbstractActorCritic(Agent):
         self.critic_optimizer: torch.nn.Module = None
         self.critic: torch.nn.Module = None
 
-        self._batch_size = batch_size
-        self._batch_count = batch_count
+        self._num_learning_epochs = num_learning_epochs
+        self._batch_size = batch_size        
+        self._batch_count = batch_count        
         self._polyak_factor = polyak
         self._return_steps = return_steps
         self._recurrent = recurrent

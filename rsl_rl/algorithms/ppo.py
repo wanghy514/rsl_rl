@@ -1,6 +1,6 @@
 import torch
 from torch import nn, optim
-from typing import Any, Dict, Tuple, Type, Union
+from typing import Any, Dict, Tuple, Type, Union, Callable, Optional
 
 from rsl_rl.algorithms.actor_critic import AbstractActorCritic
 from rsl_rl.env import VecEnv
@@ -40,7 +40,7 @@ class PPO(AbstractActorCritic):
         learning_rate: float = 1e-3,
         schedule: str = "fixed",
         target_kl: float = 0.01,
-        value_coeff: float = 1.0,
+        value_coeff: float = 1.0,        
         **kwargs,
     ):
         """
@@ -89,13 +89,6 @@ class PPO(AbstractActorCritic):
         )
         self.critic = self.critic_network(self._critic_input_size, 1, **self._critic_network_kwargs)
 
-
-        print ("================= Actor network ===================")
-        print (self.actor)
-        print ("================= Critic network ===================")
-        print (self.critic)
-        print ("================================================")
-
         if self.recurrent:
             self.actor.reset_full_hidden_state(batch_size=self.env.num_envs)
             self.critic.reset_full_hidden_state(batch_size=self.env.num_envs)
@@ -125,15 +118,25 @@ class PPO(AbstractActorCritic):
     def draw_actions(
         self, obs: torch.Tensor, env_info: Dict[str, Any]
     ) -> Tuple[torch.Tensor, Union[Dict[str, torch.Tensor], None]]:
+        return self.draw_actions_with_teacher(obs, env_info, teacher=None)
+    
+    @Benchmarkable.register
+    def draw_actions_with_teacher(
+        self, obs: torch.Tensor, env_info: Dict[str, Any], teacher: Optional[Callable] = None,
+    ) -> Tuple[torch.Tensor, Union[Dict[str, torch.Tensor], None]]:
         actor_obs, critic_obs = self._process_observations(obs, env_info)
 
-        data = {}
+        if teacher is None:
+            if self.recurrent:
+                data["actor_state_h"] = self.actor.hidden_state[0].detach()
+                data["actor_state_c"] = self.actor.hidden_state[1].detach()
 
-        if self.recurrent:
-            data["actor_state_h"] = self.actor.hidden_state[0].detach()
-            data["actor_state_c"] = self.actor.hidden_state[1].detach()
-
-        mean, std = self.actor.forward(actor_obs, compute_std=True)
+            mean, std = self.actor.forward(actor_obs, compute_std=True)
+        else:
+            mean = teacher(obs)
+            std = torch.ones_like(mean) * 1e-6
+        
+        data = {}                
         action_distribution = torch.distributions.Normal(mean, std)
         actions = self._process_actions(action_distribution.rsample()).detach()
         action_prediction_logp = action_distribution.log_prob(actions).sum(-1)
@@ -219,51 +222,62 @@ class PPO(AbstractActorCritic):
         total_surrogate_loss = torch.zeros(self._batch_count)
         total_value_loss = torch.zeros(self._batch_count)
 
-        for idx, batch in enumerate(self.storage.batch_generator(self._batch_count, trajectories=self.recurrent)):
-            if self.recurrent:
-                transition_obs = batch["actor_observations"].reshape(*batch["actor_observations"].shape[:2], -1)
-                observations, data = transitions_to_trajectories(transition_obs, batch["dones"])
-                hidden_state_h, _ = transitions_to_trajectories(batch["actor_state_h"], batch["dones"])
-                hidden_state_c, _ = transitions_to_trajectories(batch["actor_state_c"], batch["dones"])
-                # Init. sequence with each trajectory's first hidden state. Subsequent hidden states are produced by the
-                # network, depending on the previous hidden state and the current observation.
-                hidden_state = (hidden_state_h[0].transpose(0, 1), hidden_state_c[0].transpose(0, 1))
+        cnt = 0
+        for epoch in range(self._num_learning_epochs):
+            for idx, batch in enumerate(self.storage.batch_generator(self._batch_count, trajectories=self.recurrent)):
+                cnt += 1
+                
+                # print (" ------------- cnt=", cnt)
+                # for k in batch:                    
+                #     print (k, batch[k].shape)
+                # print ("------------------------------")
 
-                action_mean, action_std = self.actor.forward(observations, hidden_state=hidden_state, compute_std=True)
+                if self.recurrent:
+                    transition_obs = batch["actor_observations"].reshape(*batch["actor_observations"].shape[:2], -1)
+                    observations, data = transitions_to_trajectories(transition_obs, batch["dones"])
+                    hidden_state_h, _ = transitions_to_trajectories(batch["actor_state_h"], batch["dones"])
+                    hidden_state_c, _ = transitions_to_trajectories(batch["actor_state_c"], batch["dones"])
+                    # Init. sequence with each trajectory's first hidden state. Subsequent hidden states are produced by the
+                    # network, depending on the previous hidden state and the current observation.
+                    hidden_state = (hidden_state_h[0].transpose(0, 1), hidden_state_c[0].transpose(0, 1))
 
-                action_mean = action_mean.reshape(*observations.shape[:-1], self._action_size)
-                action_std = action_std.reshape(*observations.shape[:-1], self._action_size)
+                    action_mean, action_std = self.actor.forward(observations, hidden_state=hidden_state, compute_std=True)
 
-                action_mean = trajectories_to_transitions(action_mean, data)
-                action_std = trajectories_to_transitions(action_std, data)
-            else:
-                action_mean, action_std = self.actor.forward(batch["actor_observations"], compute_std=True)
+                    action_mean = action_mean.reshape(*observations.shape[:-1], self._action_size)
+                    action_std = action_std.reshape(*observations.shape[:-1], self._action_size)
 
-            actions_dist = torch.distributions.Normal(action_mean, action_std)
+                    action_mean = trajectories_to_transitions(action_mean, data)
+                    action_std = trajectories_to_transitions(action_std, data)
+                else:
+                    action_mean, action_std = self.actor.forward(batch["actor_observations"], compute_std=True)
 
-            if self._schedule == self.schedule_adaptive:
-                self._update_learning_rate(batch, actions_dist)
+                actions_dist = torch.distributions.Normal(action_mean, action_std)
 
-            surrogate_loss = self._compute_actor_loss(batch, actions_dist)
-            value_loss = self._compute_value_loss(batch)
-            actions_entropy = actions_dist.entropy().sum(-1)
+                if self._schedule == self.schedule_adaptive:
+                    self._update_learning_rate(batch, actions_dist)
 
-            loss = surrogate_loss + self._value_coeff * value_loss - self._entropy_coeff * actions_entropy.mean()
+                surrogate_loss = self._compute_actor_loss(batch, actions_dist)
+                value_loss = self._compute_value_loss(batch)
+                actions_entropy = actions_dist.entropy().sum(-1)
 
-            self.optimizer.zero_grad()
-            loss.backward()
-            nn.utils.clip_grad_norm_(self.parameters(), self._gradient_clip)
-            self.optimizer.step()
+                loss = surrogate_loss + self._value_coeff * value_loss - self._entropy_coeff * actions_entropy.mean()
 
-            total_loss[idx] = loss.detach()
-            total_surrogate_loss[idx] = surrogate_loss.detach()
-            total_value_loss[idx] = value_loss.detach()
+                self.optimizer.zero_grad()
+                loss.backward()
+                nn.utils.clip_grad_norm_(self.parameters(), self._gradient_clip)
+                self.optimizer.step()
+
+                total_loss[idx] = loss.detach()
+                total_surrogate_loss[idx] = surrogate_loss.detach()
+                total_value_loss[idx] = value_loss.detach()
 
         stats = {
             "total": total_loss.mean().item(),
             "surrogate": total_surrogate_loss.mean().item(),
             "value": total_value_loss.mean().item(),
         }
+
+        # print ("cnt=", cnt)
 
         return stats
 
